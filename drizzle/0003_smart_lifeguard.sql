@@ -1,1 +1,0 @@
-ALTER TABLE `ncm_cache` ADD CONSTRAINT `ncm_cache_account_product_idx` UNIQUE(`accountId`,`productId`);
