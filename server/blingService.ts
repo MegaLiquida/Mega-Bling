@@ -239,6 +239,43 @@ export async function getProductBySku(account: BlingAccount, sku: string): Promi
   return lista.find((p: any) => (p.codigo ?? "").trim() === sku.trim()) ?? lista[0] ?? null;
 }
 
+export async function getProductByName(account: BlingAccount, name: string): Promise<any | null> {
+  const token = await getValidToken(account);
+  const data = await blingRequest<any>({
+    method: "GET",
+    url: `${BLING_API}/produtos`,
+    headers: getHeaders(token),
+    params: { nome: name, limite: 10 },
+    __accountId: account.id,
+  } as any);
+  const lista = data?.data ?? [];
+  // Retorna o primeiro produto com NCM válido, ou o primeiro da lista
+  const withNcm = lista.find((p: any) => {
+    const ncm = p?.tributacao?.ncm;
+    return ncm && String(ncm).trim() !== '' && String(ncm).trim() !== '0000.00.00';
+  });
+  return withNcm ?? lista[0] ?? null;
+}
+
+export async function getProductByEan(account: BlingAccount, ean: string): Promise<any | null> {
+  const token = await getValidToken(account);
+  const data = await blingRequest<any>({
+    method: "GET",
+    url: `${BLING_API}/produtos`,
+    headers: getHeaders(token),
+    // A API Bling v3 suporta filtro por GTIN/EAN via parâmetro gtins[]
+    params: { 'gtins[]': ean, limite: 5 },
+    __accountId: account.id,
+  } as any);
+  const lista = data?.data ?? [];
+  // Retorna o primeiro produto com NCM válido, ou o primeiro da lista
+  const withNcm = lista.find((p: any) => {
+    const ncm = p?.tributacao?.ncm;
+    return ncm && String(ncm).trim() !== '' && String(ncm).trim() !== '0000.00.00';
+  });
+  return withNcm ?? lista[0] ?? null;
+}
+
 export async function createProduct(account: BlingAccount, productData: any) {
   const token = await getValidToken(account);
   const data = await blingRequest<any>({

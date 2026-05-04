@@ -5,6 +5,7 @@ import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerBlingCallbackRoute } from "../blingCallback";
+import { registerExcelUploadRoute } from "../excelUpload";
 import { startTokenRefreshJob } from "../tokenRefreshJob";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -43,6 +44,8 @@ async function startServer() {
   registerOAuthRoutes(app);
   // Bling OAuth callback
   registerBlingCallbackRoute(app);
+  // Excel upload route
+  registerExcelUploadRoute(app as any);
   // tRPC API
   app.use(
     "/api/trpc",

@@ -34,12 +34,16 @@ interface ProductCheckResult {
 export default function Home() {
   // Auth removido — sistema acessível sem login
   const [step, setStep] = useState<Step>(1);
-  const [sourceType, setSourceType] = useState<"bling" | "magis5">("bling");
+  const [sourceType, setSourceType] = useState<"bling" | "magis5" | "excel">("bling");
   const [sourceAccountId, setSourceAccountId] = useState<string>("");
   const [destAccountId, setDestAccountId] = useState<string>("");
   const [syncDate, setSyncDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [products, setProducts] = useState<ProductItem[]>([]);
   const [orderCount, setOrderCount] = useState(0);
+  const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [excelLoading, setExcelLoading] = useState(false);
+  const [excelWarnings, setExcelWarnings] = useState<string[]>([]);
+  const [ncmLookupProgress, setNcmLookupProgress] = useState<{ done: number; total: number; current: string } | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [progress, setProgress] = useState(0);

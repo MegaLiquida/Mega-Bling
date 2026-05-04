@@ -33,6 +33,7 @@ import {
   getAllBlockStatuses,
   markAccountBlocked,
 } from "./blingService";
+import { lookupNcmBySku } from "./ncmLookup";
 
 // ID fixo do owner — não requer autenticação
 const OWNER_USER_ID = 1;
@@ -520,6 +521,30 @@ const blingRouter = router({
 
       return { products, orderCount: orders.length };
     }),
+
+  // Lookup NCM em cascata: banco interno → SKU Bling → nome Bling → BrasilAPI
+  lookupNcmBySku: publicProcedure
+    .input(z.object({ sku: z.string(), name: z.string().optional(), ean: z.string().optional() }))
+    .mutation(async ({ input }) => {
+      return await lookupNcmBySku(input.sku, input.name, input.ean);
+    }),
+
+  // Get NCM cache by SKUs (para importação Excel)
+  getNcmCache: publicProcedure
+    .input(z.object({ skus: z.array(z.string()) }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const rows = await db.select().from(ncmCache).where(inArray(ncmCache.sku, input.skus));
+      const bySkuMap = new Map();
+      rows.forEach((r) => {
+        if (!bySkuMap.has(r.sku) && r.ncm) {
+          bySkuMap.set(r.sku, { sku: r.sku, ncm: r.ncm, origem: r.origem, cest: r.cest });
+        }
+      });
+      return Array.from(bySkuMap.values());
+    }),
+
 
   // Salvar NCM no cache (para NCMs digitados manualmente pelo usuário)
   saveNcmCache: publicProcedure
