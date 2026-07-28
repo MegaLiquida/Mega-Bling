@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -31,6 +30,9 @@ interface ProductCheckResult {
   status: ProductCheckStatus;
   error?: string;
 }
+
+const accountSelectClassName =
+  "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50";
 
 export default function Home() {
   // Auth removido — sistema acessível sem login
@@ -510,35 +512,37 @@ export default function Home() {
                     {sourceType === "bling" && (
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta de Origem</label>
-                        <Select key={`source-bling-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`} value={sourceAccountId} onValueChange={setSourceAccountId}>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Selecione a conta..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {accounts.map((a) => (
-                              <SelectItem key={a.id} value={String(a.id)}>
-                                {a.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <select
+                          aria-label="Conta de Origem"
+                          value={sourceAccountId}
+                          onChange={(event) => setSourceAccountId(event.target.value)}
+                          className={accountSelectClassName}
+                        >
+                          <option value="">Selecione a conta...</option>
+                          {accounts.map((account) => (
+                            <option key={account.id} value={String(account.id)}>
+                              {account.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     )}
                     {sourceType === "magis5" && (
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Bling Emissora</label>
-                        <Select key={`source-magis5-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`} value={sourceAccountId} onValueChange={setSourceAccountId}>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Selecione a conta..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {accounts.map((a) => (
-                              <SelectItem key={a.id} value={String(a.id)}>
-                                {a.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <select
+                          aria-label="Conta Bling Emissora"
+                          value={sourceAccountId}
+                          onChange={(event) => setSourceAccountId(event.target.value)}
+                          className={accountSelectClassName}
+                        >
+                          <option value="">Selecione a conta...</option>
+                          {accounts.map((account) => (
+                            <option key={account.id} value={String(account.id)}>
+                              {account.name}
+                            </option>
+                          ))}
+                        </select>
                         <p className="text-xs text-muted-foreground">Usada para buscar NCM dos produtos</p>
                       </div>
                     )}
@@ -659,46 +663,54 @@ export default function Home() {
                     <div className="space-y-3">
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Emissora (quem emite a nota)</label>
-                        <Select
-                          key={`emitter-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`}
+                        <select
+                          aria-label="Conta Emissora"
                           value={emitterAccountId}
-                          onValueChange={(v) => { setEmitterAccountId(v); setChecksDone(false); setProductChecks(products.map((p) => ({ sku: p.sku, name: p.name, status: "pending" as ProductCheckStatus }))); }}
+                          onChange={(event) => {
+                            setEmitterAccountId(event.target.value);
+                            setChecksDone(false);
+                            setProductChecks(products.map((product) => ({
+                              sku: product.sku,
+                              name: product.name,
+                              status: "pending" as ProductCheckStatus,
+                            })));
+                          }}
                           disabled={isCheckingProducts || sendNFe.isPending}
+                          className={accountSelectClassName}
                         >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Selecione a conta emissora..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {accounts.map((a) => (
-                              <SelectItem key={a.id} value={String(a.id)}>
-                                {a.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                          <option value="">Selecione a conta emissora...</option>
+                          {accounts.map((account) => (
+                            <option key={account.id} value={String(account.id)}>
+                              {account.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Destinatária (quem recebe a nota)</label>
-                        <Select
-                          key={`receiver-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`}
+                        <select
+                          aria-label="Conta Destinatária"
                           value={receiverAccountId}
-                          onValueChange={(v) => { setReceiverAccountId(v); setChecksDone(false); setProductChecks(products.map((p) => ({ sku: p.sku, name: p.name, status: "pending" as ProductCheckStatus }))); }}
+                          onChange={(event) => {
+                            setReceiverAccountId(event.target.value);
+                            setChecksDone(false);
+                            setProductChecks(products.map((product) => ({
+                              sku: product.sku,
+                              name: product.name,
+                              status: "pending" as ProductCheckStatus,
+                            })));
+                          }}
                           disabled={isCheckingProducts || sendNFe.isPending}
+                          className={accountSelectClassName}
                         >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Selecione a conta destinatária..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="magis5">
-                              🟢 Magis5 (Mega Facility SP Ltda)
-                            </SelectItem>
-                            {accounts.map((a) => (
-                              <SelectItem key={a.id} value={String(a.id)}>
-                                {a.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                          <option value="">Selecione a conta destinatária...</option>
+                          <option value="magis5">Magis5 (Mega Facility SP Ltda)</option>
+                          {accounts.map((account) => (
+                            <option key={account.id} value={String(account.id)}>
+                              {account.name}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </div>
                     <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-1">
