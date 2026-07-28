@@ -12,8 +12,6 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false
-      - key: DATABASE_SSL
-        value: "false"
       - key: JWT_SECRET
         sync: false
       - key: OAUTH_SERVER_URL

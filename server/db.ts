@@ -19,7 +19,7 @@ let _pool: Pool | null = null;
 function shouldUseSsl(connectionString: string): boolean {
   if (process.env.DATABASE_SSL === "true") return true;
   if (process.env.DATABASE_SSL === "false") return false;
-  return connectionString.includes("render.com") || process.env.NODE_ENV === "production";
+  return connectionString.includes("render.com");
 }
 
 export async function getDb() {
