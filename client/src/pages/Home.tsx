@@ -510,7 +510,7 @@ export default function Home() {
                     {sourceType === "bling" && (
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta de Origem</label>
-                        <Select value={sourceAccountId} onValueChange={setSourceAccountId}>
+                        <Select key={`source-bling-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`} value={sourceAccountId} onValueChange={setSourceAccountId}>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione a conta..." />
                           </SelectTrigger>
@@ -518,9 +518,6 @@ export default function Home() {
                             {accounts.map((a) => (
                               <SelectItem key={a.id} value={String(a.id)}>
                                 {a.name}
-                                {a.cnpj && (
-                                  <span className="ml-2 text-xs text-muted-foreground">{a.cnpj}</span>
-                                )}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -530,7 +527,7 @@ export default function Home() {
                     {sourceType === "magis5" && (
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Bling Emissora</label>
-                        <Select value={sourceAccountId} onValueChange={setSourceAccountId}>
+                        <Select key={`source-magis5-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`} value={sourceAccountId} onValueChange={setSourceAccountId}>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione a conta..." />
                           </SelectTrigger>
@@ -538,9 +535,6 @@ export default function Home() {
                             {accounts.map((a) => (
                               <SelectItem key={a.id} value={String(a.id)}>
                                 {a.name}
-                                {a.cnpj && (
-                                  <span className="ml-2 text-xs text-muted-foreground">{a.cnpj}</span>
-                                )}
                               </SelectItem>
                             ))}
                           </SelectContent>
@@ -666,6 +660,7 @@ export default function Home() {
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Emissora (quem emite a nota)</label>
                         <Select
+                          key={`emitter-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`}
                           value={emitterAccountId}
                           onValueChange={(v) => { setEmitterAccountId(v); setChecksDone(false); setProductChecks(products.map((p) => ({ sku: p.sku, name: p.name, status: "pending" as ProductCheckStatus }))); }}
                           disabled={isCheckingProducts || sendNFe.isPending}
@@ -685,6 +680,7 @@ export default function Home() {
                       <div className="space-y-1.5">
                         <label className="text-sm font-medium">Conta Destinatária (quem recebe a nota)</label>
                         <Select
+                          key={`receiver-${accounts.map(a => `${a.id}:${a.name}`).join(',')}`}
                           value={receiverAccountId}
                           onValueChange={(v) => { setReceiverAccountId(v); setChecksDone(false); setProductChecks(products.map((p) => ({ sku: p.sku, name: p.name, status: "pending" as ProductCheckStatus }))); }}
                           disabled={isCheckingProducts || sendNFe.isPending}
@@ -696,12 +692,11 @@ export default function Home() {
                             <SelectItem value="magis5">
                               🟢 Magis5 (Mega Facility SP Ltda)
                             </SelectItem>
-                            {accounts
-                              .map((a) => (
-                                <SelectItem key={a.id} value={String(a.id)}>
-                                  {a.name}
-                                </SelectItem>
-                              ))}
+                            {accounts.map((a) => (
+                              <SelectItem key={a.id} value={String(a.id)}>
+                                {a.name}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </div>
