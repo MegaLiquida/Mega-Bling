@@ -17,7 +17,8 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { ProductTable, ProductItem } from "@/components/ProductTable";
 import { AddAccountModal } from "@/components/AddAccountModal";
-import { Package, Send, History, RefreshCw, CheckCircle2, AlertTriangle, Clock, Plus, Search, Loader2, XCircle, ShieldAlert, ShieldCheck, Timer } from "lucide-react";
+import { ManageAccountsModal } from "@/components/ManageAccountsModal";
+import { Package, Send, History, RefreshCw, CheckCircle2, AlertTriangle, Clock, Plus, Search, Loader2, XCircle, ShieldAlert, ShieldCheck, Timer, Settings } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 type Step = 1 | 2 | 3;
@@ -42,6 +43,7 @@ export default function Home() {
   const [orderCount, setOrderCount] = useState(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [addAccountOpen, setAddAccountOpen] = useState(false);
+  const [manageAccountsOpen, setManageAccountsOpen] = useState(false);
   const [progress, setProgress] = useState(0);
   const [productChecks, setProductChecks] = useState<ProductCheckResult[]>([]);
   const [checksDone, setChecksDone] = useState(false);
@@ -52,6 +54,31 @@ export default function Home() {
   const { data: accountsStatus = [], refetch: refetchStatus } = trpc.bling.getAccountsStatus.useQuery(undefined, {
     refetchInterval: 10000, // Atualizar a cada 10 segundos para manter o contador
   });
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthSuccess = params.get("bling_success");
+    const oauthError = params.get("bling_error");
+
+    if (oauthSuccess === "1") {
+      toast.success("Conta Bling reautorizada com sucesso.");
+      utils.bling.listAccounts.invalidate();
+      utils.bling.getAccountsStatus.invalidate();
+    } else if (oauthError) {
+      toast.error(`Falha na reautorização do Bling: ${oauthError}`);
+    }
+
+    if (oauthSuccess || oauthError) {
+      params.delete("bling_success");
+      params.delete("bling_error");
+      const query = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`
+      );
+    }
+  }, []);
 
   // Contador regressivo: atualiza a cada segundo para mostrar tempo restante
   const [tick, setTick] = useState(0);
@@ -367,6 +394,10 @@ export default function Home() {
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
+            <Button variant="outline" size="sm" onClick={() => setManageAccountsOpen(true)}>
+              <Settings className="mr-1 h-4 w-4" />
+              Gerenciar Contas
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setAddAccountOpen(true)}>
               <Plus className="mr-1 h-4 w-4" />
               Adicionar Conta
@@ -901,6 +932,17 @@ export default function Home() {
         open={addAccountOpen}
         onClose={() => setAddAccountOpen(false)}
         onSuccess={() => utils.bling.listAccounts.invalidate()}
+      />
+
+      {/* Manage Accounts Modal */}
+      <ManageAccountsModal
+        open={manageAccountsOpen}
+        onClose={() => setManageAccountsOpen(false)}
+        accounts={accounts}
+        onSuccess={() => {
+          utils.bling.listAccounts.invalidate();
+          utils.bling.getAccountsStatus.invalidate();
+        }}
       />
 
       {/* Confirmation Dialog */}

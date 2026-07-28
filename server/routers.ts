@@ -4,6 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
+import { isValidCnpj, normalizeCnpj } from "@shared/cnpj";
 import {
   getMagis5OrdersByDate,
   extractProductsFromMagis5Orders,
@@ -77,6 +78,29 @@ const blingRouter = router({
       return { success: true };
     }),
 
+  // Update the CNPJ of an existing Bling account
+  updateAccountCnpj: publicProcedure
+    .input(
+      z.object({
+        accountId: z.number().int().positive(),
+        cnpj: z.string().min(1),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const account = await getBlingAccountById(input.accountId);
+      if (!account || account.userId !== OWNER_USER_ID) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Conta não encontrada" });
+      }
+
+      const cnpj = normalizeCnpj(input.cnpj);
+      if (!isValidCnpj(cnpj)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "CNPJ inválido" });
+      }
+
+      await updateBlingAccountCnpj(account.id, cnpj);
+      return { success: true, cnpj };
+    }),
+
   // Delete a Bling account
   deleteAccount: publicProcedure
     .input(z.object({ accountId: z.number() }))
@@ -87,10 +111,10 @@ const blingRouter = router({
 
   // Get OAuth authorization URL for a Bling account
   getAuthUrl: publicProcedure
-    .input(z.object({ accountId: z.number() }))
-    .query(async ({ input }) => {
+    .input(z.object({ accountId: z.number().int().positive() }))
+    .mutation(async ({ input }) => {
       const account = await getBlingAccountById(input.accountId);
-      if (!account) {
+      if (!account || account.userId !== OWNER_USER_ID) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Conta não encontrada" });
       }
       const redirectUri = `${process.env.OAUTH_SERVER_URL ?? ""}/api/bling/callback`;
