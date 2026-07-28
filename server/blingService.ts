@@ -1,59 +1,49 @@
 import axios, { AxiosRequestConfig } from "axios";
 import { BlingAccount } from "../drizzle/schema";
-import { updateBlingToken, getNcmFromCache, getNcmFromCacheBySku, upsertNcmCache } from "./db";
+import {
+  getBlingAccountById,
+  getNcmFromCache,
+  getNcmFromCacheBySku,
+  updateBlingToken,
+  upsertNcmCache,
+} from "./db";
 
-const BLING_API = "https://api.bling.com.br/v3";
-const BLING_TOKEN_URL = "https://api.bling.com.br/Api/v3/oauth/token";
-const MAX_RETRIES = 3;
-const PARALLEL_BATCH_SIZE = 3; // Requisições paralelas simultâneas (conservador para evitar 429)
-const BATCH_DELAY_MS = 500; // Delay entre lotes de pedidos
+const BLING_API = "https://api.bling.com.br/Api/v3";
+const BLING_TOKEN_URL = `${BLING_API}/oauth/token`;
+const MAX_RETRIES = 4;
+const REQUEST_INTERVAL_MS = 1000; // 1 req/s deixa margem para o outro sistema que usa as mesmas credenciais
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Semáforo simples para limitar concorrência e respeitar rate limit do Bling
+// Fila serial que também garante intervalo mínimo entre o início das requisições.
+// O retry acontece fora da fila para não causar deadlock quando a API retorna 429.
 class RateLimiter {
-  private queue: Array<() => void> = [];
-  private running = 0;
-  private readonly maxConcurrent: number;
-  private readonly delayMs: number;
+  private tail: Promise<void> = Promise.resolve();
+  private nextStartAt = 0;
 
-  constructor(maxConcurrent: number, delayMs: number) {
-    this.maxConcurrent = maxConcurrent;
-    this.delayMs = delayMs;
-  }
+  constructor(private readonly intervalMs: number) {}
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const execute = async () => {
-        this.running++;
-        try {
-          await sleep(this.delayMs);
-          const result = await fn();
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        } finally {
-          this.running--;
-          if (this.queue.length > 0) {
-            const next = this.queue.shift()!;
-            next();
-          }
-        }
-      };
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const execution = this.tail
+      .catch(() => undefined)
+      .then(async () => {
+        const waitMs = Math.max(0, this.nextStartAt - Date.now());
+        if (waitMs > 0) await sleep(waitMs);
+        this.nextStartAt = Date.now() + this.intervalMs;
+        return fn();
+      });
 
-      if (this.running < this.maxConcurrent) {
-        execute();
-      } else {
-        this.queue.push(execute);
-      }
-    });
+    this.tail = execution.then(
+      () => undefined,
+      () => undefined
+    );
+    return execution;
   }
 }
 
-// Rate limiter global: 1 requisição simultânea com 600ms de delay para evitar bloqueio Cloudflare
-const globalRateLimiter = new RateLimiter(1, 600); // 1 req simultânea, 600ms de delay para evitar bloqueio Cloudflare
+const globalRateLimiter = new RateLimiter(REQUEST_INTERVAL_MS);
 
 // ─── Rastreamento de bloqueio Cloudflare por conta ───────────────────────────
 // Mapa: accountId → timestamp (ms) em que o bloqueio foi detectado
@@ -98,76 +88,161 @@ const BLING_DEFAULT_HEADERS = {
   "Cache-Control": "no-cache",
 };
 
-async function blingRequest<T>(config: AxiosRequestConfig, retries = MAX_RETRIES): Promise<T> {
-  return globalRateLimiter.run(async () => {
+type BlingRequestConfig = AxiosRequestConfig & { __accountId?: number };
+
+function getRetryDelayMs(err: any, attempt: number): number {
+  const retryAfter = err?.response?.headers?.["retry-after"];
+  const retryAfterSeconds = Number(retryAfter);
+  const retryAfterMs = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 0;
+  const exponentialBackoffMs = Math.pow(2, attempt + 1) * 1000;
+  const jitterMs = Math.floor(Math.random() * 250);
+  return Math.max(retryAfterMs, exponentialBackoffMs) + jitterMs;
+}
+
+async function blingRequest<T>(config: BlingRequestConfig, retries = MAX_RETRIES): Promise<T> {
+  let currentConfig: BlingRequestConfig = { ...config };
+  let authRetried = false;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      // Mesclar headers padrão com os headers da requisição
-      const mergedConfig = {
-        ...config,
-        headers: { ...BLING_DEFAULT_HEADERS, ...config.headers },
-      };
-      const response = await axios(mergedConfig);
-      return response.data;
+      return await globalRateLimiter.run(async () => {
+        const { __accountId: _accountId, ...axiosConfig } = currentConfig;
+        const response = await axios({
+          ...axiosConfig,
+          headers: { ...BLING_DEFAULT_HEADERS, ...axiosConfig.headers },
+        });
+        return response.data;
+      });
     } catch (err: any) {
       const status = err?.response?.status;
 
-      if (retries > 0 && (status === 429 || status === 503 || status === 502)) {
-        const waitMs = Math.pow(2, MAX_RETRIES - retries + 1) * 1000;
-        console.warn(`[BlingService] Status ${status} recebido. Aguardando ${waitMs}ms antes de tentar novamente...`);
-        await sleep(waitMs);
-        return blingRequest<T>(config, retries - 1);
-      }
-
-      // 403 = bloqueio Cloudflare ou token inválido — não fazer retry, falhar imediatamente
-      if (status === 403) {
-        console.warn(`[BlingService] Status 403 recebido (possível bloqueio Cloudflare). Falhando imediatamente sem retry.`);
-        // Registrar bloqueio se o accountId foi passado na config
-        if ((config as any).__accountId) {
-          markAccountBlocked((config as any).__accountId);
+      // Se o token foi revogado/expirou antes da data local, renova uma única vez e repete.
+      if (status === 401 && currentConfig.__accountId && !authRetried) {
+        const latestAccount = await getBlingAccountById(currentConfig.__accountId);
+        if (latestAccount) {
+          console.warn(`[BlingService] Token inválido na conta ${latestAccount.id}; renovando e repetindo a requisição...`);
+          const newToken = await refreshBlingToken(latestAccount, true);
+          currentConfig = {
+            ...currentConfig,
+            headers: { ...currentConfig.headers, Authorization: `Bearer ${newToken}` },
+          };
+          authRetried = true;
+          continue;
         }
-        throw new Error(`Bling API error 403: Acesso bloqueado (Cloudflare). Aguarde alguns minutos e tente novamente.`);
       }
 
-      const errorData = err?.response?.data?.error;
+      if (attempt < retries && (status === 429 || status === 503 || status === 502)) {
+        const waitMs = getRetryDelayMs(err, attempt);
+        console.warn(`[BlingService] Status ${status} recebido. Nova tentativa em ${waitMs}ms (${attempt + 1}/${retries})...`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      const responseBody = err?.response?.data;
+      const bodyText = typeof responseBody === "string" ? responseBody : JSON.stringify(responseBody ?? {});
+      const isCloudflareBlock = status === 403 && /cloudflare|cf-ray|access denied/i.test(bodyText);
+      if (isCloudflareBlock && currentConfig.__accountId) {
+        markAccountBlocked(currentConfig.__accountId);
+      }
+
+      const errorData = responseBody?.error;
       const fields = errorData?.fields ?? [];
       const fieldMessages = fields.map((f: any) => `${f.element ?? "campo"}: ${f.msg}`).join("; ");
-      const message = errorData?.description ?? err?.response?.data?.message ?? err.message;
+      const message =
+        errorData?.description ??
+        errorData?.message ??
+        responseBody?.message ??
+        (isCloudflareBlock ? "Acesso temporariamente bloqueado pelo Cloudflare" : err.message);
       const fullMessage = fieldMessages ? `${message} | Campos: ${fieldMessages}` : message;
-      console.error(`[BlingService] Erro ${status} na URL ${config.url}:`, JSON.stringify(err?.response?.data, null, 2));
+      console.error(`[BlingService] Erro ${status} na URL ${currentConfig.url}:`, bodyText.slice(0, 2000));
       throw new Error(`Bling API error ${status ?? "?"}: ${fullMessage}`);
     }
-  });
+  }
+
+  throw new Error("Bling API error: número máximo de tentativas excedido");
 }
 
 // ─── Token Management ─────────────────────────────────────────────────────────
 
-export async function refreshBlingToken(account: BlingAccount): Promise<string> {
-  const credentials = Buffer.from(`${account.clientId}:${account.clientSecret}`).toString("base64");
-  const response = await axios.post(
-    BLING_TOKEN_URL,
-    new URLSearchParams({ grant_type: "refresh_token", refresh_token: account.refreshToken }),
-    {
-      headers: {
-        Authorization: `Basic ${credentials}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "1.0",
-      },
+const tokenRefreshInFlight = new Map<number, Promise<string>>();
+const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+function tokenIsValid(account: BlingAccount): boolean {
+  if (!account.accessToken || !account.tokenExpiresAt) return false;
+  return new Date(account.tokenExpiresAt).getTime() - Date.now() >= TOKEN_REFRESH_BUFFER_MS;
+}
+
+function copyTokenState(target: BlingAccount, source: BlingAccount): void {
+  target.accessToken = source.accessToken;
+  target.refreshToken = source.refreshToken;
+  target.tokenExpiresAt = source.tokenExpiresAt;
+}
+
+export async function refreshBlingToken(account: BlingAccount, force = false): Promise<string> {
+  const existingRefresh = tokenRefreshInFlight.get(account.id);
+  if (existingRefresh) return existingRefresh;
+
+  const refreshPromise = (async () => {
+    // Outro job ou requisição pode ter renovado depois que o objeto foi carregado.
+    const latestAccount = (await getBlingAccountById(account.id)) ?? account;
+    if (!force && tokenIsValid(latestAccount)) {
+      copyTokenState(account, latestAccount);
+      return latestAccount.accessToken;
     }
-  );
-  const { access_token, refresh_token, expires_in } = response.data;
-  const expiresAt = new Date(Date.now() + expires_in * 1000);
-  await updateBlingToken(account.id, access_token, refresh_token, expiresAt);
-  return access_token;
+
+    if (!latestAccount.refreshToken) {
+      throw new Error(`Conta Bling ${account.id} não possui refresh token`);
+    }
+
+    try {
+      const credentials = Buffer.from(`${latestAccount.clientId}:${latestAccount.clientSecret}`).toString("base64");
+      const response = await axios.post(
+        BLING_TOKEN_URL,
+        new URLSearchParams({ grant_type: "refresh_token", refresh_token: latestAccount.refreshToken }),
+        {
+          headers: {
+            Authorization: `Basic ${credentials}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "1.0",
+          },
+        }
+      );
+      const { access_token, refresh_token, expires_in } = response.data;
+      const expiresAt = new Date(Date.now() + expires_in * 1000);
+      await updateBlingToken(account.id, access_token, refresh_token, expiresAt);
+
+      account.accessToken = access_token;
+      account.refreshToken = refresh_token;
+      account.tokenExpiresAt = expiresAt;
+      return access_token;
+    } catch (err: any) {
+      const description = err?.response?.data?.error_description ?? err?.response?.data?.error?.description ?? err.message;
+      console.error(`[BlingService] Falha ao renovar token da conta ${account.id}: ${description}`);
+      throw new Error(`Não foi possível renovar o token da conta ${account.name}: ${description}`);
+    }
+  })();
+
+  tokenRefreshInFlight.set(account.id, refreshPromise);
+  try {
+    return await refreshPromise;
+  } finally {
+    if (tokenRefreshInFlight.get(account.id) === refreshPromise) {
+      tokenRefreshInFlight.delete(account.id);
+    }
+  }
 }
 
 export async function getValidToken(account: BlingAccount): Promise<string> {
-  const now = new Date();
-  const expiresAt = account.tokenExpiresAt ? new Date(account.tokenExpiresAt) : null;
-  const bufferMs = 5 * 60 * 1000;
-  if (!expiresAt || expiresAt.getTime() - now.getTime() < bufferMs) {
-    return refreshBlingToken(account);
+  if (tokenIsValid(account)) return account.accessToken;
+
+  // Recarrega o registro para absorver renovações feitas pelo job ou por outra requisição.
+  const latestAccount = await getBlingAccountById(account.id);
+  if (latestAccount && tokenIsValid(latestAccount)) {
+    copyTokenState(account, latestAccount);
+    return latestAccount.accessToken;
   }
-  return account.accessToken;
+
+  return refreshBlingToken(latestAccount ?? account);
 }
 
 function getHeaders(token: string) {
@@ -787,27 +862,31 @@ export async function extractProductsFromOrders(
   const t0 = Date.now();
   console.log(`[extractProducts] Iniciando extração de ${orders.length} pedidos...`);
 
-  // Passo 1: Buscar detalhes de todos os pedidos em lotes pequenos com delay entre lotes
+  // Passo 1: buscar detalhes sequencialmente. A API limita chamadas por aplicação/conta,
+  // e essas credenciais também são usadas pelo MegaLiquida.
   const orderDetails: Array<{ order: any; detail: any }> = [];
-  for (let i = 0; i < orders.length; i += PARALLEL_BATCH_SIZE) {
-    const batch = orders.slice(i, i + PARALLEL_BATCH_SIZE);
-    const batchResults = await Promise.all(
-      batch.map(async (order) => {
-        try {
-          const detail = await getOrderDetail(account, order.id);
-          return { order, detail };
-        } catch (err: any) {
-          console.warn(`[extractProducts] Erro ao buscar pedido ${order.id}: ${err.message}`);
-          return { order, detail: null };
-        }
-      })
-    );
-    orderDetails.push(...batchResults);
-    // Delay entre lotes para evitar 429
-    if (i + PARALLEL_BATCH_SIZE < orders.length) {
-      await sleep(BATCH_DELAY_MS);
+  const detailErrors: string[] = [];
+  for (let i = 0; i < orders.length; i++) {
+    const order = orders[i];
+    try {
+      const detail = await getOrderDetail(account, order.id);
+      orderDetails.push({ order, detail });
+    } catch (err: any) {
+      const errorMessage = err?.message ?? "erro desconhecido";
+      detailErrors.push(`pedido ${order.id}: ${errorMessage}`);
+      console.warn(`[extractProducts] Erro ao buscar pedido ${order.id}: ${errorMessage}`);
+      orderDetails.push({ order, detail: null });
     }
-    console.log(`[extractProducts] Lote ${Math.floor(i / PARALLEL_BATCH_SIZE) + 1}/${Math.ceil(orders.length / PARALLEL_BATCH_SIZE)} concluído`);
+    console.log(`[extractProducts] Pedido ${i + 1}/${orders.length} processado`);
+  }
+
+  const successfulDetails = orderDetails.filter(({ detail }) => Boolean(detail)).length;
+  if (orders.length > 0 && successfulDetails === 0) {
+    const firstError = detailErrors[0] ?? "a API não retornou detalhes";
+    throw new Error(`Não foi possível obter os detalhes de nenhum dos ${orders.length} pedidos. Primeiro erro: ${firstError}`);
+  }
+  if (detailErrors.length > 0) {
+    console.warn(`[extractProducts] ${detailErrors.length} de ${orders.length} pedidos falharam; continuando com ${successfulDetails}.`);
   }
   console.log(`[extractProducts] Detalhes de pedidos obtidos em ${Date.now() - t0}ms`);
 
