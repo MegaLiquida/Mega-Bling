@@ -1,4 +1,5 @@
 import {
+  bigint,
   integer,
   numeric,
   pgEnum,
@@ -74,8 +75,8 @@ export const ncmCache = pgTable(
   "ncm_cache",
   {
     id: serial("id").primaryKey(),
-    accountId: integer("accountId").notNull(),
-    productId: integer("productId"), // null para produtos sem ID Bling (ex: Magis5)
+    accountId: bigint("accountId", { mode: "number" }).notNull(),
+    productId: bigint("productId", { mode: "number" }), // null para produtos sem ID Bling (ex: Magis5)
     sku: varchar("sku", { length: 255 }).notNull(),
     ncm: varchar("ncm", { length: 20 }),
     origem: integer("origem"),
