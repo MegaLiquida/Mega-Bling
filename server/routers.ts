@@ -252,7 +252,10 @@ const blingRouter = router({
       })
     )
     .mutation(async ({ input }) => {
-      const sourceAccount = await getBlingAccountById(input.sourceAccountId);
+      // sourceAccountId = 0 quando a fonte é Excel (usa o destAccount como referência)
+      const sourceAccount = input.sourceAccountId === 0
+        ? await getBlingAccountById(input.destAccountId)
+        : await getBlingAccountById(input.sourceAccountId);
       const destAccount = await getBlingAccountById(input.destAccountId);
 
       if (!sourceAccount) {
@@ -293,7 +296,10 @@ const blingRouter = router({
       // destAccountId = conta emissora (quem emite a NFe)
       // receiverAccountId = conta destinatária (cujo CNPJ será o contato na emissora)
       // receiverAccountId = -1 significa Magis5 (Mega Facility)
-      const sourceAccount = await getBlingAccountById(input.sourceAccountId);
+      // sourceAccountId = 0 quando a fonte é Excel (usa o destAccount/emitter como referência)
+      const sourceAccount = input.sourceAccountId === 0
+        ? await getBlingAccountById(input.destAccountId)
+        : await getBlingAccountById(input.sourceAccountId);
       const emitterAccount = await getBlingAccountById(input.destAccountId);
 
       // Verificar se o destinatário é o Magis5
@@ -543,6 +549,42 @@ const blingRouter = router({
       }
 
       return { products, orderCount: orders.length };
+    }),
+
+  // Import products from Excel spreadsheet (parsed client-side, sent as JSON)
+  importExcelProducts: publicProcedure
+    .input(
+      z.object({
+        products: z.array(
+          z.object({
+            sku: z.string(),
+            name: z.string(),
+            quantity: z.number(),
+            price: z.number(),
+            unit: z.string().optional(),
+            ncm: z.string().optional(),
+            origem: z.union([z.number(), z.string()]).optional(),
+            cest: z.string().optional(),
+            productId: z.number().optional(),
+          })
+        ),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const products = input.products.map((p) => ({
+        productId: 0,
+        sku: p.sku,
+        name: p.name,
+        quantity: p.quantity,
+        price: p.price,
+        unit: (p.unit || "UN").trim() || "UN",
+        ncm: p.ncm || "",
+        origem: typeof p.origem === "string" ? Number(p.origem) || 0 : (p.origem ?? 0),
+        cest: p.cest || "",
+      }));
+
+      // orderCount = 1 (vem de um arquivo)
+      return { products, orderCount: 1 };
     }),
 
   // Salvar NCM no cache (para NCMs digitados manualmente pelo usuário)

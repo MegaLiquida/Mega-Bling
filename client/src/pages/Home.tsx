@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Upload, FileSpreadsheet } from "lucide-react";
+import { readExcelProducts } from "@/lib/excelParser";
 import {
   Dialog,
   DialogContent,
@@ -37,7 +39,9 @@ const accountSelectClassName =
 export default function Home() {
   // Auth removido — sistema acessível sem login
   const [step, setStep] = useState<Step>(1);
-  const [sourceType, setSourceType] = useState<"bling" | "magis5">("bling");
+  const [sourceType, setSourceType] = useState<"bling" | "magis5" | "excel">("bling");
+  const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [excelError, setExcelError] = useState<string>("");
   const [sourceAccountId, setSourceAccountId] = useState<string>("");
   const [destAccountId, setDestAccountId] = useState<string>("");
   const [syncDate, setSyncDate] = useState(() => new Date().toISOString().split("T")[0]);
@@ -124,6 +128,24 @@ export default function Home() {
     },
   });
 
+  const importExcelProducts = trpc.bling.importExcelProducts.useMutation({
+    onSuccess: (data) => {
+      setProducts((data.products as ProductItem[]).map((p) => ({
+        ...p,
+        unit: (p.unit || "UN").trim() || "UN",
+      })));
+      setOrderCount(data.orderCount);
+      if (data.products.length === 0) {
+        toast.info("Nenhum produto encontrado na planilha.");
+      } else {
+        setStep(2);
+      }
+    },
+    onError: (err) => {
+      toast.error(`Erro ao importar planilha: ${err.message}`);
+    },
+  });
+
   const fetchMagis5Products = trpc.bling.fetchMagis5Products.useMutation({
     onSuccess: (data) => {
       // Produtos do Magis5 não têm productId — usar 0 como placeholder
@@ -176,7 +198,7 @@ export default function Home() {
   function handleUpdateNcm(sku: string, ncm: string, persist = false) {
     setProducts((prev) => prev.map((p) => (p.sku === sku ? { ...p, ncm } : p)));
     // Persistir no banco quando o usuário sair do campo (onBlur) e o NCM for válido
-    if (persist && ncm && ncm !== "0000.00.00" && sourceType === "magis5" && sourceAccountId) {
+    if (persist && ncm && ncm !== "0000.00.00" && sourceAccountId) {
       saveNcmCache.mutate({ accountId: Number(sourceAccountId), sku, ncm });
     }
   }
@@ -191,6 +213,31 @@ export default function Home() {
 
   function handleRemoveProduct(sku: string) {
     setProducts((prev) => prev.filter((p) => p.sku !== sku));
+  }
+
+  async function handleExcelFileSelect(file: File) {
+    const ext = file.name.toLowerCase().split(".").pop();
+    if (ext !== "xlsx" && ext !== "xls") {
+      setExcelError("Formato não suportado. Use .xlsx ou .xls");
+      setExcelFile(null);
+      return;
+    }
+    setExcelError("");
+    setExcelFile(file);
+    // A importação ocorre ao clicar em "Importar Planilha"
+  }
+
+  async function handleImportExcel() {
+    if (!excelFile) {
+      setExcelError("Selecione um arquivo Excel primeiro.");
+      return;
+    }
+    try {
+      const parsedProducts = await readExcelProducts(excelFile);
+      importExcelProducts.mutate({ products: parsedProducts });
+    } catch (err: any) {
+      setExcelError(err.message);
+    }
   }
 
   const [isCheckingProducts, setIsCheckingProducts] = useState(false);
@@ -245,8 +292,11 @@ export default function Home() {
     for (let i = 0; i < products.length; i++) {
       const p = products[i];
       try {
+        const effectiveSourceAccountId = sourceType === "excel"
+          ? Number(emitterAccountId)
+          : Number(sourceAccountId);
         const result = await checkSingleProduct.mutateAsync({
-          sourceAccountId: Number(sourceAccountId),
+          sourceAccountId: effectiveSourceAccountId,
           destAccountId: Number(emitterAccountId),
           item: {
             productId: p.productId,
@@ -285,8 +335,11 @@ export default function Home() {
       });
     }, 800);
 
+    const effectiveSourceAccountId = sourceType === "excel"
+      ? Number(emitterAccountId)
+      : Number(sourceAccountId);
     sendNFe.mutate({
-      sourceAccountId: Number(sourceAccountId),
+      sourceAccountId: effectiveSourceAccountId,
       destAccountId: Number(emitterAccountId),
       receiverAccountId: isMagis5Receiver ? -1 : Number(receiverAccountId),
       syncDate,
@@ -304,7 +357,9 @@ export default function Home() {
     });
   }
 
-  const sourceAccount = accounts.find((a) => a.id === Number(sourceAccountId));
+  const sourceAccount = sourceType === "excel"
+    ? { id: 0, name: "Excel", cnpj: "", hasToken: true, tokenExpiresAt: null }
+    : accounts.find((a) => a.id === Number(sourceAccountId));
   const emitterAccount = accounts.find((a) => a.id === Number(emitterAccountId));
   const isMagis5Receiver = receiverAccountId === "magis5";
   const receiverAccount = isMagis5Receiver
@@ -456,7 +511,7 @@ export default function Home() {
                 <CardHeader>
                   <CardTitle>1. Selecionar Conta e Data</CardTitle>
                   <CardDescription>
-                    Escolha a fonte dos pedidos (Bling ou Magis5) e a data que deseja importar.
+                    Escolha a fonte dos pedidos (Bling, Magis5 ou Excel) e a data que deseja importar.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -499,12 +554,26 @@ export default function Home() {
                           value="magis5"
                           checked={sourceType === "magis5"}
                           onChange={(e) => {
-                            setSourceType(e.target.value as "bling" | "magis5");
+                            setSourceType(e.target.value as "bling" | "magis5" | "excel");
                             setSourceAccountId("");
                           }}
                           className="h-4 w-4"
                         />
                         <span className="text-sm">Magis5</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="sourceType"
+                          value="excel"
+                          checked={sourceType === "excel"}
+                          onChange={(e) => {
+                            setSourceType(e.target.value as "bling" | "magis5" | "excel");
+                            setSourceAccountId("");
+                          }}
+                          className="h-4 w-4"
+                        />
+                        <span className="text-sm">Excel</span>
                       </label>
                     </div>
                   </div>
@@ -546,6 +615,61 @@ export default function Home() {
                         <p className="text-xs text-muted-foreground">Usada para buscar NCM dos produtos</p>
                       </div>
                     )}
+                    {sourceType === "excel" && (
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-medium">Planilha Excel</label>
+                        <p className="text-xs text-muted-foreground">
+                          Arquivo .xlsx ou .xls com colunas: <strong>SKU, Nome, Quantidade e Valor</strong>
+                        </p>
+                        <div
+                          className={`flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-6 transition-colors ${
+                            excelFile ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                          }`}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const file = e.dataTransfer.files[0];
+                            if (file) handleExcelFileSelect(file);
+                          }}
+                        >
+                          {excelFile ? (
+                            <div className="flex items-center gap-2 text-sm">
+                              <FileSpreadsheet className="h-4 w-4 text-primary" />
+                              <span className="font-medium">{excelFile.name}</span>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => { setExcelFile(null); setExcelError(""); }}
+                              >
+                                <XCircle className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center gap-1 text-sm text-muted-foreground">
+                              <Upload className="h-5 w-5 mb-1" />
+                              <span>
+                                Arraste o arquivo aqui ou{" "}
+                                <label className="text-primary underline cursor-pointer">
+                                  clique para selecionar
+                                  <input
+                                    type="file"
+                                    accept=".xlsx,.xls"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file) handleExcelFileSelect(file);
+                                    }}
+                                  />
+                                </label>
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        {excelError && (
+                          <p className="text-xs text-red-500">{excelError}</p>
+                        )}
+                      </div>
+                    )}
                     <div className="space-y-1.5">
                       <label className="text-sm font-medium">Data dos Pedidos</label>
                       <input
@@ -556,39 +680,59 @@ export default function Home() {
                       />
                     </div>
                   </div>
-                  <Button
-                    className="w-full"
-                    disabled={
-                      (sourceType === "bling" && !sourceAccountId) ||
-                      fetchBlingProducts.isPending ||
-                      fetchMagis5Products.isPending
-                    }
-                    onClick={() => {
-                      if (sourceType === "bling") {
-                        fetchBlingProducts.mutate({
-                          accountId: Number(sourceAccountId),
-                          date: syncDate,
-                        });
-                      } else {
-                        fetchMagis5Products.mutate({
-                          date: syncDate,
-                          sourceAccountId: sourceAccountId ? Number(sourceAccountId) : undefined,
-                        });
+                  {sourceType === "excel" ? (
+                    <Button
+                      className="w-full"
+                      disabled={!excelFile || importExcelProducts.isPending}
+                      onClick={handleImportExcel}
+                    >
+                      {importExcelProducts.isPending ? (
+                        <>
+                          <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          Importando planilha...
+                        </>
+                      ) : (
+                        <>
+                          <FileSpreadsheet className="mr-2 h-4 w-4" />
+                          Importar Planilha
+                        </>
+                      )}
+                    </Button>
+                  ) : (
+                    <Button
+                      className="w-full"
+                      disabled={
+                        (sourceType === "bling" && !sourceAccountId) ||
+                        fetchBlingProducts.isPending ||
+                        fetchMagis5Products.isPending
                       }
-                    }}
-                  >
-                    {(fetchBlingProducts.isPending || fetchMagis5Products.isPending) ? (
-                      <>
-                        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                        Buscando produtos...
-                      </>
-                    ) : (
-                      <>
-                        <Package className="mr-2 h-4 w-4" />
-                        Buscar Produtos dos Pedidos
-                      </>
-                    )}
-                  </Button>
+                      onClick={() => {
+                        if (sourceType === "bling") {
+                          fetchBlingProducts.mutate({
+                            accountId: Number(sourceAccountId),
+                            date: syncDate,
+                          });
+                        } else if (sourceType === "magis5") {
+                          fetchMagis5Products.mutate({
+                            date: syncDate,
+                            sourceAccountId: sourceAccountId ? Number(sourceAccountId) : undefined,
+                          });
+                        }
+                      }}
+                    >
+                      {(fetchBlingProducts.isPending || fetchMagis5Products.isPending) ? (
+                        <>
+                          <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          Buscando produtos...
+                        </>
+                      ) : (
+                        <>
+                          <Package className="mr-2 h-4 w-4" />
+                          Buscar Produtos dos Pedidos
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </CardContent>
               </Card>
             )}
