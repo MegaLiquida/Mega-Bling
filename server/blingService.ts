@@ -48,7 +48,7 @@ const globalRateLimiter = new RateLimiter(REQUEST_INTERVAL_MS);
 // ─── Rastreamento de bloqueio Cloudflare por conta ───────────────────────────
 // Mapa: accountId → timestamp (ms) em que o bloqueio foi detectado
 const cloudflareBlockedAt = new Map<number, number>();
-const CLOUDFLARE_BLOCK_DURATION_MS = 60 * 60 * 1000; // 60 minutos
+const CLOUDFLARE_BLOCK_DURATION_MS = 5 * 60 * 1000; // Reduzido para 5 minutos para testes
 
 export function markAccountBlocked(accountId: number) {
   cloudflareBlockedAt.set(accountId, Date.now());
