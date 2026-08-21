@@ -196,17 +196,37 @@ export async function refreshBlingToken(account: BlingAccount, force = false): P
 
     try {
       const credentials = Buffer.from(`${latestAccount.clientId}:${latestAccount.clientSecret}`).toString("base64");
-      const response = await axios.post(
-        BLING_TOKEN_URL,
-        new URLSearchParams({ grant_type: "refresh_token", refresh_token: latestAccount.refreshToken }),
-        {
-          headers: {
-            Authorization: `Basic ${credentials}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "1.0",
-          },
+      
+      let response;
+      let refreshRetries = 3;
+      for (let i = 0; i <= refreshRetries; i++) {
+        try {
+          response = await axios.post(
+            BLING_TOKEN_URL,
+            new URLSearchParams({ grant_type: "refresh_token", refresh_token: latestAccount.refreshToken }),
+            {
+              headers: {
+                Authorization: `Basic ${credentials}`,
+                "Content-Type": "application/x-www-form-urlencoded",
+                Accept: "1.0",
+              },
+            }
+          );
+          break; // Sucesso
+        } catch (err: any) {
+          const status = err?.response?.status;
+          if (i < refreshRetries && (status === 429 || status === 503)) {
+            const waitMs = Math.pow(2, i + 1) * 2000 + Math.floor(Math.random() * 1000);
+            console.warn(`[BlingService] Erro ${status} na renovação de token da conta ${account.id}. Tentativa ${i + 1}/${refreshRetries} em ${waitMs}ms...`);
+            await sleep(waitMs);
+            continue;
+          }
+          throw err;
         }
-      );
+      }
+
+      if (!response) throw new Error("Falha na resposta de renovação de token");
+
       const { access_token, refresh_token, expires_in } = response.data;
       const expiresAt = new Date(Date.now() + expires_in * 1000);
       await updateBlingToken(account.id, access_token, refresh_token, expiresAt);

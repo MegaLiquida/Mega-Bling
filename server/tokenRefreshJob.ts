@@ -56,10 +56,16 @@ async function refreshExpiringTokens() {
         console.log(`[TokenRefreshJob] ✓ Token renovado com sucesso para "${account.name}"`);
         renewed++;
       } catch (err: any) {
+        const isRateLimit = err.message.includes("429") || err.message.includes("Too Many Requests");
         console.error(
-          `[TokenRefreshJob] ✗ Falha ao renovar token de "${account.name}": ${err.message}`
+          `[TokenRefreshJob] ✗ Falha ao renovar token de "${account.name}": ${err.message}${isRateLimit ? " (Rate Limit detectado)" : ""}`
         );
         failed++;
+        
+        // Se for rate limit, espera um pouco mais antes da próxima conta
+        if (isRateLimit) {
+          await new Promise((r) => setTimeout(r, 5000));
+        }
       }
       // Pequeno delay entre renovações para não sobrecarregar a API Bling
       await new Promise((r) => setTimeout(r, 500));
