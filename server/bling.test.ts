@@ -12,6 +12,7 @@ vi.mock("./db", () => ({
   createSyncHistory: vi.fn(),
   getSyncHistoryByUserId: vi.fn(),
   updateBlingAccountCnpj: vi.fn(),
+  updateBlingAccountCredentials: vi.fn(),
   updateBlingToken: vi.fn(),
   upsertUser: vi.fn(),
   getUserByOpenId: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("./db", () => ({
 
 vi.mock("./blingService", () => ({
   getValidToken: vi.fn().mockResolvedValue("mock-token"),
+  refreshBlingToken: vi.fn(),
   getOrdersByDate: vi.fn().mockResolvedValue([]),
   extractProductsFromOrders: vi.fn().mockResolvedValue([]),
   createSaleNFe: vi.fn().mockResolvedValue({ id: 99, numero: "001" }),
@@ -32,7 +34,7 @@ vi.mock("./blingService", () => ({
 
 import * as db from "./db";
 import * as blingService from "./blingService";
-import { startTokenRefreshJob } from "./tokenRefreshJob";
+import { refreshExpiringTokens, resetInvalidRefreshBackoffForTests, startTokenRefreshJob } from "./tokenRefreshJob";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -113,6 +115,52 @@ describe("bling.deleteAccount", () => {
     const result = await caller.bling.deleteAccount({ accountId: 1 });
     expect(result.success).toBe(true);
     expect(db.deleteBlingAccount).toHaveBeenCalledWith(1, 1);
+  });
+});
+
+describe("bling.updateAccountCredentials", () => {
+  it("atualiza credenciais e calcula expiração a partir de expiresIn", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-31T12:00:00Z"));
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(mockAccount);
+    vi.mocked(db.updateBlingAccountCredentials).mockResolvedValue(undefined);
+
+    const caller = appRouter.createCaller(makeCtx());
+    const result = await caller.bling.updateAccountCredentials({
+      accountId: 1,
+      clientId: "novo-client-id",
+      clientSecret: "novo-client-secret",
+      accessToken: "novo-access-token",
+      refreshToken: "novo-refresh-token",
+      expiresIn: 21600,
+    });
+
+    expect(result.success).toBe(true);
+    expect(db.updateBlingAccountCredentials).toHaveBeenCalledWith({
+      id: 1,
+      userId: 1,
+      clientId: "novo-client-id",
+      clientSecret: "novo-client-secret",
+      accessToken: "novo-access-token",
+      refreshToken: "novo-refresh-token",
+      tokenExpiresAt: new Date("2026-08-31T18:00:00Z"),
+    });
+    vi.useRealTimers();
+  });
+
+  it("rejeita conta inexistente", async () => {
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(undefined);
+    const caller = appRouter.createCaller(makeCtx());
+
+    await expect(
+      caller.bling.updateAccountCredentials({
+        accountId: 999,
+        clientId: "client",
+        clientSecret: "secret",
+        accessToken: "access",
+        refreshToken: "refresh",
+      })
+    ).rejects.toThrow("Conta não encontrada");
   });
 });
 
@@ -272,5 +320,25 @@ describe("tokenRefreshJob", () => {
       const timer = startTokenRefreshJob();
       clearInterval(timer);
     }).not.toThrow();
+  });
+
+  it("não repete refresh inválido em ciclos consecutivos dentro do backoff", async () => {
+    const expiredAccount = {
+      ...mockAccount,
+      id: 5,
+      name: "UniteTech",
+      tokenExpiresAt: new Date(Date.now() - 60_000),
+    };
+    vi.mocked(db.getAllBlingAccounts).mockResolvedValue([expiredAccount]);
+    vi.mocked(blingService.refreshBlingToken).mockRejectedValue(
+      new Error("Não foi possível renovar o token da conta UniteTech: Invalid refresh token")
+    );
+    resetInvalidRefreshBackoffForTests();
+
+    const first = await refreshExpiringTokens();
+    const second = await refreshExpiringTokens();
+
+    expect(first).toEqual({ renewed: 0, skipped: 0, failed: 1 });
+    expect(second).toEqual({ renewed: 0, skipped: 1, failed: 0 });
   });
 });

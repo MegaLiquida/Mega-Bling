@@ -15,19 +15,29 @@ import { refreshBlingToken } from "./blingService";
 
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutos
 const REFRESH_BUFFER_MS = 60 * 60 * 1000; // renovar se expira em menos de 60 min
+const INVALID_REFRESH_BACKOFF_MS = 6 * 60 * 60 * 1000; // evitar tentativa a cada ciclo quando o refresh foi rejeitado
+const invalidRefreshNotifiedAt = new Map<number, number>();
 
-async function refreshExpiringTokens() {
+function isInvalidRefreshTokenError(message: string): boolean {
+  return /invalid refresh token|invalid_grant/i.test(message);
+}
+
+export function resetInvalidRefreshBackoffForTests() {
+  invalidRefreshNotifiedAt.clear();
+}
+
+export async function refreshExpiringTokens() {
   let accounts: Awaited<ReturnType<typeof getAllBlingAccounts>>;
   try {
     accounts = await getAllBlingAccounts();
   } catch (err: any) {
     console.warn("[TokenRefreshJob] Não foi possível buscar contas:", err.message);
-    return;
+    return { renewed: 0, skipped: 0, failed: 0 };
   }
 
   if (!accounts || accounts.length === 0) {
     console.log("[TokenRefreshJob] Nenhuma conta Bling cadastrada.");
-    return;
+    return { renewed: 0, skipped: 0, failed: 0 };
   }
 
   const now = Date.now();
@@ -53,13 +63,30 @@ async function refreshExpiringTokens() {
       );
       try {
         await refreshBlingToken(account);
+        invalidRefreshNotifiedAt.delete(account.id);
         console.log(`[TokenRefreshJob] ✓ Token renovado com sucesso para "${account.name}"`);
         renewed++;
       } catch (err: any) {
         const isRateLimit = err.message.includes("429") || err.message.includes("Too Many Requests");
-        console.error(
-          `[TokenRefreshJob] ✗ Falha ao renovar token de "${account.name}": ${err.message}${isRateLimit ? " (Rate Limit detectado)" : ""}`
-        );
+        const isInvalidRefresh = isInvalidRefreshTokenError(err.message ?? "");
+        const now = Date.now();
+        const lastInvalidNotice = invalidRefreshNotifiedAt.get(account.id) ?? 0;
+
+        if (isInvalidRefresh && now - lastInvalidNotice < INVALID_REFRESH_BACKOFF_MS) {
+          skipped++;
+          continue;
+        }
+
+        if (isInvalidRefresh) {
+          invalidRefreshNotifiedAt.set(account.id, now);
+          console.error(
+            `[TokenRefreshJob] ✗ Refresh token rejeitado para "${account.name}". A conta precisa ser reautorizada ou ter credenciais atualizadas; novas tentativas serão adiadas por ${INVALID_REFRESH_BACKOFF_MS / 3600000}h.`
+          );
+        } else {
+          console.error(
+            `[TokenRefreshJob] ✗ Falha ao renovar token de "${account.name}": ${err.message}${isRateLimit ? " (Rate Limit detectado)" : ""}`
+          );
+        }
         failed++;
         
         // Se for rate limit, espera um pouco mais antes da próxima conta
@@ -81,6 +108,8 @@ async function refreshExpiringTokens() {
   console.log(
     `[TokenRefreshJob] Ciclo concluído: ${renewed} renovado(s), ${skipped} ignorado(s), ${failed} falha(s)`
   );
+
+  return { renewed, skipped, failed };
 }
 
 export function startTokenRefreshJob() {

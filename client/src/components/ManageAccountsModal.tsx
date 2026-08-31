@@ -38,11 +38,22 @@ export function ManageAccountsModal({
   onSuccess,
 }: ManageAccountsModalProps) {
   const [cnpjByAccount, setCnpjByAccount] = useState<Record<number, string>>({});
+  const [credentialsByAccount, setCredentialsByAccount] = useState<
+    Record<number, { clientId: string; clientSecret: string; accessToken: string; refreshToken: string }>
+  >({});
 
   useEffect(() => {
     if (!open) return;
     setCnpjByAccount(
       Object.fromEntries(accounts.map((account) => [account.id, formatCnpj(account.cnpj ?? "")]))
+    );
+    setCredentialsByAccount(
+      Object.fromEntries(
+        accounts.map((account) => [
+          account.id,
+          { clientId: "", clientSecret: "", accessToken: "", refreshToken: "" },
+        ])
+      )
     );
   }, [open, accounts]);
 
@@ -69,6 +80,20 @@ export function ManageAccountsModal({
     },
   });
 
+  const updateCredentials = trpc.bling.updateAccountCredentials.useMutation({
+    onSuccess: (_data, variables) => {
+      toast.success("Credenciais e tokens atualizados com sucesso.");
+      setCredentialsByAccount((current) => ({
+        ...current,
+        [variables.accountId]: { clientId: "", clientSecret: "", accessToken: "", refreshToken: "" },
+      }));
+      onSuccess();
+    },
+    onError: (error) => {
+      toast.error(`Não foi possível atualizar as credenciais: ${error.message}`);
+    },
+  });
+
   function handleCnpjChange(accountId: number, value: string) {
     setCnpjByAccount((current) => ({
       ...current,
@@ -87,6 +112,42 @@ export function ManageAccountsModal({
 
   function handleReconnect(accountId: number) {
     getAuthUrl.mutate({ accountId });
+  }
+
+  function handleCredentialChange(
+    accountId: number,
+    field: "clientId" | "clientSecret" | "accessToken" | "refreshToken",
+    value: string
+  ) {
+    setCredentialsByAccount((current) => {
+      const previous = current[accountId] ?? {
+        clientId: "",
+        clientSecret: "",
+        accessToken: "",
+        refreshToken: "",
+      };
+      return {
+        ...current,
+        [accountId]: { ...previous, [field]: value },
+      };
+    });
+  }
+
+  function handleSaveCredentials(accountId: number) {
+    const credentials = credentialsByAccount[accountId];
+    if (!credentials?.clientId || !credentials.clientSecret || !credentials.accessToken || !credentials.refreshToken) {
+      toast.error("Informe Client ID, Client Secret, Access Token e Refresh Token.");
+      return;
+    }
+
+    updateCredentials.mutate({
+      accountId,
+      clientId: credentials.clientId.trim(),
+      clientSecret: credentials.clientSecret.trim(),
+      accessToken: credentials.accessToken.trim(),
+      refreshToken: credentials.refreshToken.trim(),
+      expiresIn: 21600,
+    });
   }
 
   return (
@@ -159,7 +220,7 @@ export function ManageAccountsModal({
                   </Button>
                 </div>
 
-                <div className="mt-4 border-t pt-4">
+                <div className="mt-4 border-t pt-4 space-y-3">
                   <Button
                     type="button"
                     variant="outline"
@@ -169,9 +230,70 @@ export function ManageAccountsModal({
                     <RefreshCw className={`mr-2 h-4 w-4 ${isCurrentReconnect ? "animate-spin" : ""}`} />
                     {isCurrentReconnect ? "Abrindo Bling..." : "Reautorizar no Bling"}
                   </Button>
-                  <p className="mt-2 text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground">
                     Use esta ação quando o refresh token expirar. Você será direcionado ao Bling para autorizar novamente o aplicativo.
                   </p>
+
+                  <div className="rounded-md border bg-muted/20 p-3 space-y-3">
+                    <div>
+                      <h4 className="text-sm font-medium">Atualizar credenciais manualmente</h4>
+                      <p className="text-xs text-muted-foreground">
+                        Use quando você já recebeu um novo par de tokens. Os campos ficam vazios por segurança e são limpos após salvar.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="grid gap-1.5">
+                        <Label htmlFor={`client-id-${account.id}`}>Client ID</Label>
+                        <Input
+                          id={`client-id-${account.id}`}
+                          autoComplete="off"
+                          value={credentialsByAccount[account.id]?.clientId ?? ""}
+                          onChange={(event) => handleCredentialChange(account.id, "clientId", event.target.value)}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label htmlFor={`client-secret-${account.id}`}>Client Secret</Label>
+                        <Input
+                          id={`client-secret-${account.id}`}
+                          type="password"
+                          autoComplete="new-password"
+                          value={credentialsByAccount[account.id]?.clientSecret ?? ""}
+                          onChange={(event) => handleCredentialChange(account.id, "clientSecret", event.target.value)}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label htmlFor={`access-token-${account.id}`}>Access Token</Label>
+                        <Input
+                          id={`access-token-${account.id}`}
+                          type="password"
+                          autoComplete="off"
+                          value={credentialsByAccount[account.id]?.accessToken ?? ""}
+                          onChange={(event) => handleCredentialChange(account.id, "accessToken", event.target.value)}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label htmlFor={`refresh-token-${account.id}`}>Refresh Token</Label>
+                        <Input
+                          id={`refresh-token-${account.id}`}
+                          type="password"
+                          autoComplete="off"
+                          value={credentialsByAccount[account.id]?.refreshToken ?? ""}
+                          onChange={(event) => handleCredentialChange(account.id, "refreshToken", event.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => handleSaveCredentials(account.id)}
+                      disabled={updateCredentials.isPending}
+                    >
+                      <Save className="mr-2 h-4 w-4" />
+                      {updateCredentials.isPending && updateCredentials.variables?.accountId === account.id
+                        ? "Atualizando..."
+                        : "Salvar credenciais"}
+                    </Button>
+                  </div>
                 </div>
               </section>
             );

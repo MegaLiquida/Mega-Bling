@@ -17,6 +17,7 @@ import {
   createSyncHistory,
   getSyncHistoryByUserId,
   updateBlingAccountCnpj,
+  updateBlingAccountCredentials,
   updateBlingToken,
   getNcmFromCacheBySku,
   upsertNcmCacheBySku,
@@ -107,6 +108,38 @@ const blingRouter = router({
     .mutation(async ({ input }) => {
       await deleteBlingAccount(input.accountId, OWNER_USER_ID);
       return { success: true };
+    }),
+
+  // Replace OAuth credentials/tokens for an existing Bling account
+  updateAccountCredentials: publicProcedure
+    .input(
+      z.object({
+        accountId: z.number().int().positive(),
+        clientId: z.string().min(1),
+        clientSecret: z.string().min(1),
+        accessToken: z.string().min(1),
+        refreshToken: z.string().min(1),
+        expiresIn: z.number().int().positive().default(21600),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const account = await getBlingAccountById(input.accountId);
+      if (!account || account.userId !== OWNER_USER_ID) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Conta não encontrada" });
+      }
+
+      const tokenExpiresAt = new Date(Date.now() + input.expiresIn * 1000);
+      await updateBlingAccountCredentials({
+        id: account.id,
+        userId: OWNER_USER_ID,
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+        accessToken: input.accessToken,
+        refreshToken: input.refreshToken,
+        tokenExpiresAt,
+      });
+
+      return { success: true, tokenExpiresAt };
     }),
 
   // Get OAuth authorization URL for a Bling account

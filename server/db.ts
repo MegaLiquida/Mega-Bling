@@ -145,6 +145,30 @@ export async function updateBlingToken(
     .where(eq(blingAccounts.id, id));
 }
 
+export async function updateBlingAccountCredentials(data: {
+  id: number;
+  userId: number;
+  clientId: string;
+  clientSecret: string;
+  accessToken: string;
+  refreshToken: string;
+  tokenExpiresAt: Date;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  await db
+    .update(blingAccounts)
+    .set({
+      clientId: data.clientId,
+      clientSecret: data.clientSecret,
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      tokenExpiresAt: data.tokenExpiresAt,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(blingAccounts.id, data.id), eq(blingAccounts.userId, data.userId)));
+}
+
 export async function getAllBlingAccounts(): Promise<BlingAccount[]> {
   const db = await getDb();
   if (!db) return [];
