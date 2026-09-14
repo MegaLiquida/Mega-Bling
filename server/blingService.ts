@@ -227,14 +227,21 @@ export async function refreshBlingToken(account: BlingAccount, force = false): P
 
       if (!response) throw new Error("Falha na resposta de renovação de token");
 
-      const { access_token, refresh_token, expires_in } = response.data;
-      const expiresAt = new Date(Date.now() + expires_in * 1000);
-      await updateBlingToken(account.id, access_token, refresh_token, expiresAt);
+      const accessToken = response.data?.access_token;
+      const refreshToken = response.data?.refresh_token || latestAccount.refreshToken;
+      const expiresIn = Number(response.data?.expires_in);
 
-      account.accessToken = access_token;
-      account.refreshToken = refresh_token;
+      if (!accessToken || !refreshToken || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+        throw new Error("Resposta de renovação do Bling incompleta");
+      }
+
+      const expiresAt = new Date(Date.now() + expiresIn * 1000);
+      await updateBlingToken(account.id, accessToken, refreshToken, expiresAt);
+
+      account.accessToken = accessToken;
+      account.refreshToken = refreshToken;
       account.tokenExpiresAt = expiresAt;
-      return access_token;
+      return accessToken;
     } catch (err: any) {
       const description = err?.response?.data?.error_description ?? err?.response?.data?.error?.description ?? err.message;
       console.error(`[BlingService] Falha ao renovar token da conta ${account.id}: ${description}`);

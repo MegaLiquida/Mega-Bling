@@ -85,6 +85,32 @@ describe("BlingService - regressões das contas 2 e 3", () => {
     expect(staleAccount.refreshToken).toBe("refresh-novo");
   });
 
+  it("preserva o refresh token anterior quando a resposta não traz outro refresh_token", async () => {
+    const currentAccount = account({
+      id: 8,
+      accessToken: "access-expirado",
+      refreshToken: "refresh-preservado",
+    });
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(currentAccount);
+    axiosPost.mockResolvedValue({
+      data: {
+        access_token: "access-novo",
+        expires_in: 21_600,
+      },
+    });
+
+    const token = await refreshBlingToken(currentAccount);
+
+    expect(token).toBe("access-novo");
+    expect(db.updateBlingToken).toHaveBeenCalledWith(
+      8,
+      "access-novo",
+      "refresh-preservado",
+      expect.any(Date)
+    );
+    expect(currentAccount.refreshToken).toBe("refresh-preservado");
+  });
+
   it("renova uma vez e repete a listagem quando a API responde 401", async () => {
     const currentAccount = account({
       accessToken: "access-revogado",

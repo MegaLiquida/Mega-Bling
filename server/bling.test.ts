@@ -35,6 +35,7 @@ vi.mock("./blingService", () => ({
 import * as db from "./db";
 import * as blingService from "./blingService";
 import { refreshExpiringTokens, resetInvalidRefreshBackoffForTests, startTokenRefreshJob } from "./tokenRefreshJob";
+import { markInvalidRefresh, shouldSkipInvalidRefresh } from "./tokenRefreshState";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -146,6 +147,49 @@ describe("bling.updateAccountCredentials", () => {
       tokenExpiresAt: new Date("2026-08-31T18:00:00Z"),
     });
     vi.useRealTimers();
+  });
+
+  it("reutiliza Client ID e Client Secret existentes quando apenas os tokens são atualizados", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-31T12:00:00Z"));
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(mockAccount);
+    vi.mocked(db.updateBlingAccountCredentials).mockResolvedValue(undefined);
+
+    const caller = appRouter.createCaller(makeCtx());
+    await caller.bling.updateAccountCredentials({
+      accountId: 1,
+      accessToken: "novo-access-token",
+      refreshToken: "novo-refresh-token",
+      expiresIn: 21600,
+    });
+
+    expect(db.updateBlingAccountCredentials).toHaveBeenCalledWith({
+      id: 1,
+      userId: 1,
+      clientId: mockAccount.clientId,
+      clientSecret: mockAccount.clientSecret,
+      accessToken: "novo-access-token",
+      refreshToken: "novo-refresh-token",
+      tokenExpiresAt: new Date("2026-08-31T18:00:00Z"),
+    });
+    vi.useRealTimers();
+  });
+
+  it("limpa o backoff de refresh inválido ao atualizar os tokens", async () => {
+    resetInvalidRefreshBackoffForTests();
+    markInvalidRefresh(mockAccount.id);
+    expect(shouldSkipInvalidRefresh(mockAccount.id)).toBe(true);
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(mockAccount);
+    vi.mocked(db.updateBlingAccountCredentials).mockResolvedValue(undefined);
+
+    const caller = appRouter.createCaller(makeCtx());
+    await caller.bling.updateAccountCredentials({
+      accountId: mockAccount.id,
+      accessToken: "access-manual",
+      refreshToken: "refresh-manual",
+    });
+
+    expect(shouldSkipInvalidRefresh(mockAccount.id)).toBe(false);
   });
 
   it("rejeita conta inexistente", async () => {

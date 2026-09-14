@@ -48,9 +48,14 @@ export function registerBlingCallbackRoute(app: Router) {
         }
       );
 
-      const { access_token, refresh_token, expires_in } = response.data;
-      const expiresAt = new Date(Date.now() + expires_in * 1000);
-      await updateBlingToken(account.id, access_token, refresh_token, expiresAt);
+      const accessToken = response.data?.access_token;
+      const refreshToken = response.data?.refresh_token || account.refreshToken;
+      const expiresIn = Number(response.data?.expires_in);
+      if (!accessToken || !refreshToken || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+        throw new Error("Resposta OAuth do Bling incompleta");
+      }
+      const expiresAt = new Date(Date.now() + expiresIn * 1000);
+      await updateBlingToken(account.id, accessToken, refreshToken, expiresAt);
 
       console.log(`[BlingCallback] Token salvo para conta ${account.id} (${account.name})`);
       return res.redirect("/?bling_success=1");

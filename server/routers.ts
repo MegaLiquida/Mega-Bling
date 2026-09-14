@@ -35,7 +35,7 @@ import {
   getAllBlockStatuses,
   markAccountBlocked,
 } from "./blingService";
-
+import { clearInvalidRefreshBackoff } from "./tokenRefreshState";
 // ID fixo do owner — não requer autenticação
 const OWNER_USER_ID = 1;
 
@@ -115,10 +115,10 @@ const blingRouter = router({
     .input(
       z.object({
         accountId: z.number().int().positive(),
-        clientId: z.string().min(1),
-        clientSecret: z.string().min(1),
-        accessToken: z.string().min(1),
-        refreshToken: z.string().min(1),
+        clientId: z.string().trim().min(1).optional(),
+        clientSecret: z.string().trim().min(1).optional(),
+        accessToken: z.string().trim().min(1),
+        refreshToken: z.string().trim().min(1),
         expiresIn: z.number().int().positive().default(21600),
       })
     )
@@ -132,12 +132,13 @@ const blingRouter = router({
       await updateBlingAccountCredentials({
         id: account.id,
         userId: OWNER_USER_ID,
-        clientId: input.clientId,
-        clientSecret: input.clientSecret,
+        clientId: input.clientId ?? account.clientId,
+        clientSecret: input.clientSecret ?? account.clientSecret,
         accessToken: input.accessToken,
         refreshToken: input.refreshToken,
         tokenExpiresAt,
       });
+      clearInvalidRefreshBackoff(account.id);
 
       return { success: true, tokenExpiresAt };
     }),

@@ -12,19 +12,21 @@
 
 import { getAllBlingAccounts } from "./db";
 import { refreshBlingToken } from "./blingService";
+import {
+  getInvalidRefreshBackoffMs,
+  markInvalidRefresh,
+  shouldSkipInvalidRefresh,
+  clearInvalidRefreshBackoff,
+} from "./tokenRefreshState";
 
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutos
 const REFRESH_BUFFER_MS = 60 * 60 * 1000; // renovar se expira em menos de 60 min
-const INVALID_REFRESH_BACKOFF_MS = 6 * 60 * 60 * 1000; // evitar tentativa a cada ciclo quando o refresh foi rejeitado
-const invalidRefreshNotifiedAt = new Map<number, number>();
 
 function isInvalidRefreshTokenError(message: string): boolean {
   return /invalid refresh token|invalid_grant/i.test(message);
 }
 
-export function resetInvalidRefreshBackoffForTests() {
-  invalidRefreshNotifiedAt.clear();
-}
+export { resetInvalidRefreshBackoffForTests } from "./tokenRefreshState";
 
 export async function refreshExpiringTokens() {
   let accounts: Awaited<ReturnType<typeof getAllBlingAccounts>>;
@@ -63,24 +65,22 @@ export async function refreshExpiringTokens() {
       );
       try {
         await refreshBlingToken(account);
-        invalidRefreshNotifiedAt.delete(account.id);
+        clearInvalidRefreshBackoff(account.id);
         console.log(`[TokenRefreshJob] ✓ Token renovado com sucesso para "${account.name}"`);
         renewed++;
       } catch (err: any) {
         const isRateLimit = err.message.includes("429") || err.message.includes("Too Many Requests");
         const isInvalidRefresh = isInvalidRefreshTokenError(err.message ?? "");
         const now = Date.now();
-        const lastInvalidNotice = invalidRefreshNotifiedAt.get(account.id) ?? 0;
-
-        if (isInvalidRefresh && now - lastInvalidNotice < INVALID_REFRESH_BACKOFF_MS) {
+        if (isInvalidRefresh && shouldSkipInvalidRefresh(account.id, now)) {
           skipped++;
           continue;
         }
 
         if (isInvalidRefresh) {
-          invalidRefreshNotifiedAt.set(account.id, now);
+          markInvalidRefresh(account.id, now);
           console.error(
-            `[TokenRefreshJob] ✗ Refresh token rejeitado para "${account.name}". A conta precisa ser reautorizada ou ter credenciais atualizadas; novas tentativas serão adiadas por ${INVALID_REFRESH_BACKOFF_MS / 3600000}h.`
+            `[TokenRefreshJob] ✗ Refresh token rejeitado para "${account.name}". A conta precisa ser reautorizada ou ter credenciais atualizadas; novas tentativas serão adiadas por ${getInvalidRefreshBackoffMs() / 3600000}h.`
           );
         } else {
           console.error(

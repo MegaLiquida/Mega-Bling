@@ -135,15 +135,15 @@ export function ManageAccountsModal({
 
   function handleSaveCredentials(accountId: number) {
     const credentials = credentialsByAccount[accountId];
-    if (!credentials?.clientId || !credentials.clientSecret || !credentials.accessToken || !credentials.refreshToken) {
-      toast.error("Informe Client ID, Client Secret, Access Token e Refresh Token.");
+    if (!credentials?.accessToken || !credentials.refreshToken) {
+      toast.error("Informe Access Token e Refresh Token.");
       return;
     }
 
     updateCredentials.mutate({
       accountId,
-      clientId: credentials.clientId.trim(),
-      clientSecret: credentials.clientSecret.trim(),
+      ...(credentials.clientId.trim() ? { clientId: credentials.clientId.trim() } : {}),
+      ...(credentials.clientSecret.trim() ? { clientSecret: credentials.clientSecret.trim() } : {}),
       accessToken: credentials.accessToken.trim(),
       refreshToken: credentials.refreshToken.trim(),
       expiresIn: 21600,
@@ -238,12 +238,12 @@ export function ManageAccountsModal({
                     <div>
                       <h4 className="text-sm font-medium">Atualizar credenciais manualmente</h4>
                       <p className="text-xs text-muted-foreground">
-                        Use quando você já recebeu um novo par de tokens. Os campos ficam vazios por segurança e são limpos após salvar.
+                        Informe os novos tokens. Client ID e Client Secret podem ficar vazios para reutilizar os já cadastrados; os campos são limpos após salvar.
                       </p>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="grid gap-1.5">
-                        <Label htmlFor={`client-id-${account.id}`}>Client ID</Label>
+                        <Label htmlFor={`client-id-${account.id}`}>Client ID (opcional)</Label>
                         <Input
                           id={`client-id-${account.id}`}
                           autoComplete="off"
@@ -252,7 +252,7 @@ export function ManageAccountsModal({
                         />
                       </div>
                       <div className="grid gap-1.5">
-                        <Label htmlFor={`client-secret-${account.id}`}>Client Secret</Label>
+                        <Label htmlFor={`client-secret-${account.id}`}>Client Secret (opcional)</Label>
                         <Input
                           id={`client-secret-${account.id}`}
                           type="password"
