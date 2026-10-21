@@ -6,6 +6,7 @@ vi.mock("./db", () => ({
   getNcmFromCache: vi.fn(),
   getNcmFromCacheBySku: vi.fn(),
   updateBlingToken: vi.fn(),
+  withBlingTokenRefreshLock: vi.fn(async (_accountId: number, operation: () => Promise<unknown>) => operation()),
   upsertNcmCache: vi.fn(),
 }));
 
@@ -83,6 +84,33 @@ describe("BlingService - regressões das contas 2 e 3", () => {
     expect(axiosPost).toHaveBeenCalledTimes(1);
     expect(db.updateBlingToken).toHaveBeenCalledTimes(1);
     expect(staleAccount.refreshToken).toBe("refresh-novo");
+  });
+
+  it("reutiliza o token mais novo em uma repetição forçada após 401", async () => {
+    const staleAccount = account({ accessToken: "access-antigo" });
+    const latestAccount = account({
+      accessToken: "access-atualizado",
+      refreshToken: "refresh-atualizado",
+      tokenExpiresAt: new Date(Date.now() + 60 * 60_000),
+    });
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(latestAccount);
+
+    const token = await refreshBlingToken(staleAccount, true, "access-antigo");
+
+    expect(token).toBe("access-atualizado");
+    expect(axiosPost).not.toHaveBeenCalled();
+    expect(staleAccount.refreshToken).toBe("refresh-atualizado");
+  });
+
+  it("preserva invalid_grant na mensagem de erro do provedor", async () => {
+    const currentAccount = account();
+    vi.mocked(db.getBlingAccountById).mockResolvedValue(currentAccount);
+    axiosPost.mockRejectedValue({
+      response: { status: 400, data: { error: "invalid_grant" } },
+      message: "Request failed with status code 400",
+    });
+
+    await expect(refreshBlingToken(currentAccount)).rejects.toThrow("invalid_grant");
   });
 
   it("preserva o refresh token anterior quando a resposta não traz outro refresh_token", async () => {

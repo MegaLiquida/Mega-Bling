@@ -43,7 +43,7 @@ export function registerBlingCallbackRoute(app: Router) {
           headers: {
             Authorization: `Basic ${credentials}`,
             "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "1.0",
+            Accept: "application/json",
           },
         }
       );

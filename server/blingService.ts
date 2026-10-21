@@ -6,6 +6,7 @@ import {
   getNcmFromCacheBySku,
   updateBlingToken,
   upsertNcmCache,
+  withBlingTokenRefreshLock,
 } from "./db";
 
 const BLING_API = "https://api.bling.com.br/Api/v3";
@@ -99,6 +100,30 @@ function getRetryDelayMs(err: any, attempt: number): number {
   return Math.max(retryAfterMs, exponentialBackoffMs) + jitterMs;
 }
 
+function getOAuthErrorMessage(err: any): string {
+  const responseData = err?.response?.data;
+  const errorValue = responseData?.error;
+  const errorCode =
+    typeof errorValue === "string"
+      ? errorValue
+      : errorValue?.code ?? errorValue?.type;
+  const description =
+    responseData?.error_description ??
+    errorValue?.description ??
+    errorValue?.message ??
+    responseData?.message ??
+    err?.message ??
+    "erro desconhecido";
+
+  if (
+    errorCode &&
+    !String(description).toLowerCase().includes(String(errorCode).toLowerCase())
+  ) {
+    return `${errorCode}: ${description}`;
+  }
+  return String(description);
+}
+
 async function blingRequest<T>(config: BlingRequestConfig, retries = MAX_RETRIES): Promise<T> {
   let currentConfig: BlingRequestConfig = { ...config };
   let authRetried = false;
@@ -121,7 +146,12 @@ async function blingRequest<T>(config: BlingRequestConfig, retries = MAX_RETRIES
         const latestAccount = await getBlingAccountById(currentConfig.__accountId);
         if (latestAccount) {
           console.warn(`[BlingService] Token inválido na conta ${latestAccount.id}; renovando e repetindo a requisição...`);
-          const newToken = await refreshBlingToken(latestAccount, true);
+          const authorization = (currentConfig.headers as any)?.Authorization ??
+            (currentConfig.headers as any)?.authorization;
+          const staleAccessToken = typeof authorization === "string"
+            ? authorization.replace(/^Bearer\s+/i, "")
+            : undefined;
+          const newToken = await refreshBlingToken(latestAccount, true, staleAccessToken);
           currentConfig = {
             ...currentConfig,
             headers: { ...currentConfig.headers, Authorization: `Bearer ${newToken}` },
@@ -178,72 +208,94 @@ function copyTokenState(target: BlingAccount, source: BlingAccount): void {
   target.tokenExpiresAt = source.tokenExpiresAt;
 }
 
-export async function refreshBlingToken(account: BlingAccount, force = false): Promise<string> {
+export async function refreshBlingToken(
+  account: BlingAccount,
+  force = false,
+  staleAccessToken?: string,
+): Promise<string> {
   const existingRefresh = tokenRefreshInFlight.get(account.id);
   if (existingRefresh) return existingRefresh;
 
   const refreshPromise = (async () => {
-    // Outro job ou requisição pode ter renovado depois que o objeto foi carregado.
-    const latestAccount = (await getBlingAccountById(account.id)) ?? account;
-    if (!force && tokenIsValid(latestAccount)) {
-      copyTokenState(account, latestAccount);
-      return latestAccount.accessToken;
-    }
-
-    if (!latestAccount.refreshToken) {
-      throw new Error(`Conta Bling ${account.id} não possui refresh token`);
-    }
-
     try {
-      const credentials = Buffer.from(`${latestAccount.clientId}:${latestAccount.clientSecret}`).toString("base64");
-      
-      let response;
-      let refreshRetries = 3;
-      for (let i = 0; i <= refreshRetries; i++) {
-        try {
-          response = await axios.post(
-            BLING_TOKEN_URL,
-            new URLSearchParams({ grant_type: "refresh_token", refresh_token: latestAccount.refreshToken }),
-            {
-              headers: {
-                Authorization: `Basic ${credentials}`,
-                "Content-Type": "application/x-www-form-urlencoded",
-                Accept: "1.0",
-              },
-            }
-          );
-          break; // Sucesso
-        } catch (err: any) {
-          const status = err?.response?.status;
-          if (i < refreshRetries && (status === 429 || status === 503)) {
-            const waitMs = Math.pow(2, i + 1) * 2000 + Math.floor(Math.random() * 1000);
-            console.warn(`[BlingService] Erro ${status} na renovação de token da conta ${account.id}. Tentativa ${i + 1}/${refreshRetries} em ${waitMs}ms...`);
-            await sleep(waitMs);
-            continue;
-          }
-          throw err;
+      return await withBlingTokenRefreshLock(account.id, async () => {
+        // Recarregar depois de adquirir o lock é obrigatório: outra instância
+        // pode ter renovado a conta enquanto esta aguardava a fila.
+        const latestAccount = (await getBlingAccountById(account.id)) ?? account;
+        if (!force && tokenIsValid(latestAccount)) {
+          copyTokenState(account, latestAccount);
+          return latestAccount.accessToken;
         }
-      }
 
-      if (!response) throw new Error("Falha na resposta de renovação de token");
+        // Em uma repetição após 401, não force uma segunda rotação se outra
+        // instância já substituiu o token que falhou.
+        if (
+          force &&
+          staleAccessToken &&
+          latestAccount.accessToken !== staleAccessToken &&
+          tokenIsValid(latestAccount)
+        ) {
+          copyTokenState(account, latestAccount);
+          return latestAccount.accessToken;
+        }
 
-      const accessToken = response.data?.access_token;
-      const refreshToken = response.data?.refresh_token || latestAccount.refreshToken;
-      const expiresIn = Number(response.data?.expires_in);
+        if (!latestAccount.refreshToken) {
+          throw new Error(`Conta Bling ${account.id} não possui refresh token`);
+        }
 
-      if (!accessToken || !refreshToken || !Number.isFinite(expiresIn) || expiresIn <= 0) {
-        throw new Error("Resposta de renovação do Bling incompleta");
-      }
+        const credentials = Buffer.from(`${latestAccount.clientId}:${latestAccount.clientSecret}`).toString("base64");
+        let response;
+        const refreshRetries = 3;
+        for (let i = 0; i <= refreshRetries; i++) {
+          try {
+            response = await axios.post(
+              BLING_TOKEN_URL,
+              new URLSearchParams({
+                grant_type: "refresh_token",
+                refresh_token: latestAccount.refreshToken,
+              }),
+              {
+                timeout: 30_000,
+                headers: {
+                  Authorization: `Basic ${credentials}`,
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  Accept: "application/json",
+                },
+              },
+            );
+            break;
+          } catch (err: any) {
+            const status = err?.response?.status;
+            if (i < refreshRetries && [429, 500, 502, 503, 504].includes(status)) {
+              const waitMs = Math.pow(2, i + 1) * 2000 + Math.floor(Math.random() * 1000);
+              console.warn(`[BlingService] Erro ${status} na renovação de token da conta ${account.id}. Tentativa ${i + 1}/${refreshRetries} em ${waitMs}ms...`);
+              await sleep(waitMs);
+              continue;
+            }
+            throw err;
+          }
+        }
 
-      const expiresAt = new Date(Date.now() + expiresIn * 1000);
-      await updateBlingToken(account.id, accessToken, refreshToken, expiresAt);
+        if (!response) throw new Error("Falha na resposta de renovação de token");
 
-      account.accessToken = accessToken;
-      account.refreshToken = refreshToken;
-      account.tokenExpiresAt = expiresAt;
-      return accessToken;
+        const accessToken = response.data?.access_token;
+        const refreshToken = response.data?.refresh_token || latestAccount.refreshToken;
+        const expiresIn = Number(response.data?.expires_in);
+
+        if (!accessToken || !refreshToken || !Number.isFinite(expiresIn) || expiresIn <= 0) {
+          throw new Error("Resposta de renovação do Bling incompleta");
+        }
+
+        const expiresAt = new Date(Date.now() + expiresIn * 1000);
+        await updateBlingToken(latestAccount.id, accessToken, refreshToken, expiresAt);
+
+        account.accessToken = accessToken;
+        account.refreshToken = refreshToken;
+        account.tokenExpiresAt = expiresAt;
+        return accessToken;
+      });
     } catch (err: any) {
-      const description = err?.response?.data?.error_description ?? err?.response?.data?.error?.description ?? err.message;
+      const description = getOAuthErrorMessage(err);
       console.error(`[BlingService] Falha ao renovar token da conta ${account.id}: ${description}`);
       throw new Error(`Não foi possível renovar o token da conta ${account.name}: ${description}`);
     }

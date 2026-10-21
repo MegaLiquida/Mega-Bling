@@ -14,6 +14,7 @@ vi.mock("./db", () => ({
   updateBlingAccountCnpj: vi.fn(),
   updateBlingAccountCredentials: vi.fn(),
   updateBlingToken: vi.fn(),
+  withBlingTokenRefreshLock: vi.fn(async (_accountId: number, operation: () => Promise<unknown>) => operation()),
   upsertUser: vi.fn(),
   getUserByOpenId: vi.fn(),
   getAllBlingAccounts: vi.fn().mockResolvedValue([]),

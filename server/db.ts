@@ -16,6 +16,10 @@ import { ENV } from "./_core/env";
 let _db: ReturnType<typeof drizzle> | null = null;
 let _pool: Pool | null = null;
 
+// Namespace reservado para locks de renovação OAuth. O lock é mantido na
+// sessão PostgreSQL enquanto a chamada ao provedor externo estiver em curso.
+const BLING_TOKEN_LOCK_NAMESPACE = 178924;
+
 function shouldUseSsl(connectionString: string): boolean {
   if (process.env.DATABASE_SSL === "true") return true;
   if (process.env.DATABASE_SSL === "false") return false;
@@ -37,6 +41,47 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Executa uma operação de renovação sob lock distribuído por conta.
+ *
+ * O mapa em memória de blingService.ts evita duplicidade no mesmo processo,
+ * mas não protege duas instâncias/containers usando o mesmo refresh token.
+ * O advisory lock do PostgreSQL cobre esse cenário sem criar tabela auxiliar.
+ */
+export async function withBlingTokenRefreshLock<T>(
+  accountId: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await getDb();
+  if (!_pool) throw new Error("Database not available");
+
+  const client = await _pool.connect();
+  let locked = false;
+  try {
+    await client.query("SELECT pg_advisory_lock($1, $2)", [
+      BLING_TOKEN_LOCK_NAMESPACE,
+      accountId,
+    ]);
+    locked = true;
+    return await operation();
+  } finally {
+    if (locked) {
+      try {
+        await client.query("SELECT pg_advisory_unlock($1, $2)", [
+          BLING_TOKEN_LOCK_NAMESPACE,
+          accountId,
+        ]);
+      } catch (error) {
+        console.warn(
+          `[Database] Falha ao liberar lock de renovação da conta ${accountId}:`,
+          error,
+        );
+      }
+    }
+    client.release();
+  }
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
