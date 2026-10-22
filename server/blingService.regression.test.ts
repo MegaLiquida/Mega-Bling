@@ -18,7 +18,12 @@ vi.mock("axios", () => {
 
 import axios from "axios";
 import * as db from "./db";
-import { getOrdersByDate, getValidToken, refreshBlingToken } from "./blingService";
+import {
+  createSaleNFe,
+  getOrdersByDate,
+  getValidToken,
+  refreshBlingToken,
+} from "./blingService";
 
 function account(overrides: Partial<BlingAccount> = {}): BlingAccount {
   return {
@@ -111,6 +116,68 @@ describe("BlingService - regressões das contas 2 e 3", () => {
     });
 
     await expect(refreshBlingToken(currentAccount)).rejects.toThrow("invalid_grant");
+  });
+
+  it("reconcilia uma NF-e criada quando o POST retorna 504 sem reenviar a nota", async () => {
+    const currentAccount = account({
+      tokenExpiresAt: new Date(Date.now() + 60 * 60_000),
+    });
+    const item = {
+      productId: 10,
+      sku: "SKU001",
+      name: "Produto Teste",
+      quantity: 1,
+      price: 100,
+      unit: "UN",
+      ncm: "8471.30.19",
+      origem: 0,
+      cest: "",
+    };
+
+    axiosRequest
+      .mockResolvedValueOnce({
+        data: { data: [{ id: 1, descricao: "Venda de mercadoria com ST" }] },
+      })
+      .mockRejectedValueOnce({
+        response: { status: 504, data: "gateway timeout" },
+        message: "Request failed with status code 504",
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: [{ id: 123, tipo: 1, contato: { id: 7 }, naturezaOperacao: { id: 1 } }],
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            id: 123,
+            tipo: 1,
+            contato: { id: 7 },
+            naturezaOperacao: { id: 1 },
+            itens: [
+              {
+                codigo: "SKU001",
+                descricao: "Produto Teste",
+                unidade: "UN",
+                quantidade: 1,
+                valor: 100,
+                tipo: "P",
+                classificacaoFiscal: "8471.30.19",
+                origem: 0,
+                cest: "",
+              },
+            ],
+          },
+        },
+      });
+
+    const result = await createSaleNFe(currentAccount, 7, "Contato Teste", [item]);
+
+    expect(result).toEqual(expect.objectContaining({ id: 123 }));
+    expect(axiosRequest).toHaveBeenCalledTimes(4);
+    expect(axiosRequest.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ method: "POST", url: expect.stringMatching(/\/nfe$/) }),
+    );
   });
 
   it("preserva o refresh token anterior quando a resposta não traz outro refresh_token", async () => {

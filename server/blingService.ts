@@ -89,7 +89,10 @@ const BLING_DEFAULT_HEADERS = {
   "Cache-Control": "no-cache",
 };
 
-type BlingRequestConfig = AxiosRequestConfig & { __accountId?: number };
+type BlingRequestConfig = AxiosRequestConfig & {
+  __accountId?: number;
+  __nfeReconcile?: () => Promise<unknown | undefined>;
+};
 
 function getRetryDelayMs(err: any, attempt: number): number {
   const retryAfter = err?.response?.headers?.["retry-after"];
@@ -131,7 +134,11 @@ async function blingRequest<T>(config: BlingRequestConfig, retries = MAX_RETRIES
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await globalRateLimiter.run(async () => {
-        const { __accountId: _accountId, ...axiosConfig } = currentConfig;
+        const {
+          __accountId: _accountId,
+          __nfeReconcile: _nfeReconcile,
+          ...axiosConfig
+        } = currentConfig;
         const response = await axios({
           ...axiosConfig,
           headers: { ...BLING_DEFAULT_HEADERS, ...axiosConfig.headers },
@@ -161,7 +168,36 @@ async function blingRequest<T>(config: BlingRequestConfig, retries = MAX_RETRIES
         }
       }
 
-      if (attempt < retries && (status === 429 || status === 503 || status === 502)) {
+      const isNfeCreateRequest =
+        currentConfig.method?.toUpperCase() === "POST" &&
+        currentConfig.url === `${BLING_API}/nfe`;
+      const isTransientServerError = [500, 502, 503, 504].includes(status);
+
+      // O POST de NF-e não é reenviado automaticamente após um 5xx: o Bling
+      // pode ter criado a nota antes de o gateway devolver 504. Primeiro
+      // reconciliamos consultando a nota recém-criada por seus dados exatos.
+      if (isNfeCreateRequest && isTransientServerError && currentConfig.__nfeReconcile) {
+        try {
+          const reconciled = await currentConfig.__nfeReconcile();
+          if (reconciled) return reconciled as T;
+        } catch (reconcileError: any) {
+          console.warn(
+            `[BlingService] Não foi possível reconciliar a NF-e após status ${status}:`,
+            reconcileError?.message ?? reconcileError,
+          );
+        }
+
+        console.error(
+          `[BlingService] O Bling não confirmou o POST de NF-e após status ${status}. ` +
+          "A nota pode ter sido criada; não será reenviada automaticamente.",
+        );
+        throw new Error(
+          `Bling API error ${status}: O Bling não confirmou a criação da nota. ` +
+          "A nota pode ter sido criada antes do timeout; verifique as notas pendentes no Bling antes de tentar novamente.",
+        );
+      }
+
+      if (attempt < retries && (status === 429 || status === 503 || status === 502 || status === 504)) {
         const waitMs = getRetryDelayMs(err, attempt);
         console.warn(`[BlingService] Status ${status} recebido. Nova tentativa em ${waitMs}ms (${attempt + 1}/${retries})...`);
         await sleep(waitMs);
@@ -804,6 +840,144 @@ export interface NFeItem {
   cest?: string;
 }
 
+function formatBlingDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function normalizeDocument(value: unknown): string {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function normalizeNumber(value: unknown): string {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(6) : "";
+}
+
+function nfeItemSignature(item: any): string {
+  return [
+    String(item?.codigo ?? "").trim(),
+    String(item?.descricao ?? "").trim(),
+    String(item?.unidade ?? "UN").trim(),
+    normalizeNumber(item?.quantidade),
+    normalizeNumber(item?.valor),
+    String(item?.tipo ?? "P").trim(),
+    String(item?.classificacaoFiscal ?? "").trim(),
+    String(item?.cest ?? "").trim(),
+    String(item?.origem ?? "").trim(),
+  ].join("|");
+}
+
+function candidateCanMatchNfe(candidate: any, payload: any): boolean {
+  const data = candidate?.data ?? candidate;
+  if (!data?.id) return false;
+  if (data.tipo !== undefined && Number(data.tipo) !== Number(payload.tipo)) return false;
+
+  const expectedContact = payload.contato ?? {};
+  const candidateContact = data.contato ?? {};
+  if (
+    expectedContact.id !== undefined &&
+    candidateContact.id !== undefined &&
+    Number(expectedContact.id) !== Number(candidateContact.id)
+  ) {
+    return false;
+  }
+
+  const expectedDocument = normalizeDocument(expectedContact.numeroDocumento);
+  const candidateDocument = normalizeDocument(candidateContact.numeroDocumento);
+  if (expectedDocument && candidateDocument && expectedDocument !== candidateDocument) {
+    return false;
+  }
+
+  const expectedNatureza = payload.naturezaOperacao?.id;
+  const candidateNatureza = data.naturezaOperacao?.id;
+  if (
+    expectedNatureza !== undefined &&
+    candidateNatureza !== undefined &&
+    Number(expectedNatureza) !== Number(candidateNatureza)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function nfeMatchesPayload(candidate: any, payload: any): boolean {
+  if (!candidateCanMatchNfe(candidate, payload)) return false;
+  const data = candidate?.data ?? candidate;
+  const candidateItems = data.itens;
+  const expectedItems = payload.itens;
+  if (!Array.isArray(candidateItems) || candidateItems.length !== expectedItems.length) {
+    return false;
+  }
+
+  const actualSignature = candidateItems.map(nfeItemSignature).sort();
+  const expectedSignature = expectedItems.map(nfeItemSignature).sort();
+  return JSON.stringify(actualSignature) === JSON.stringify(expectedSignature);
+}
+
+async function findNfeCreatedFromPayload(
+  account: BlingAccount,
+  token: string,
+  payload: any,
+  startedAt: Date,
+): Promise<{ data: any } | undefined> {
+  const searchStart = new Date(startedAt.getTime() - 24 * 60 * 60 * 1000);
+  const searchEnd = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const reconciliationDelays = [0, 3_000, 7_000, 15_000];
+
+  for (const delay of reconciliationDelays) {
+    if (delay > 0) await sleep(delay);
+
+    try {
+      for (let page = 1; page <= 3; page++) {
+        const listResponse = await blingRequest<any>({
+          method: "GET",
+          url: `${BLING_API}/nfe`,
+          params: {
+            pagina: page,
+            limite: 100,
+            tipo: "1",
+            dataEmissaoInicial: formatBlingDateTime(searchStart),
+            dataEmissaoFinal: formatBlingDateTime(searchEnd),
+          },
+          headers: getHeaders(token),
+          __accountId: account.id,
+        });
+
+        const candidates = Array.isArray(listResponse?.data) ? listResponse.data : [];
+        for (const candidate of candidates) {
+          if (!candidateCanMatchNfe(candidate, payload)) continue;
+
+          let detail = candidate;
+          const candidateItems = (candidate?.data ?? candidate)?.itens;
+          if (!Array.isArray(candidateItems) || candidateItems.length === 0) {
+            const detailResponse = await blingRequest<any>({
+              method: "GET",
+              url: `${BLING_API}/nfe/${candidate.id}`,
+              headers: getHeaders(token),
+              __accountId: account.id,
+            });
+            detail = detailResponse?.data ?? detailResponse;
+          }
+
+          if (nfeMatchesPayload(detail, payload)) {
+            console.warn(`[BlingService] NF-e ${detail.id} localizada durante a reconciliação do timeout.`);
+            return { data: detail };
+          }
+        }
+
+        if (candidates.length < 100) break;
+      }
+    } catch (error: any) {
+      console.warn(`[BlingService] Consulta de reconciliação da NF-e falhou: ${error?.message ?? error}`);
+    }
+  }
+
+  return undefined;
+}
+
 export async function createSaleNFe(
   account: BlingAccount,
   contactId: number,
@@ -907,11 +1081,14 @@ export async function createSaleNFe(
   console.log(`[createSaleNFe] Itens: ${nfeItems.length}`);
   console.log(`[createSaleNFe] Payload completo:`, JSON.stringify(payload, null, 2));
 
+  const nfeRequestStartedAt = new Date();
   const data = await blingRequest<any>({
     method: "POST",
     url: `${BLING_API}/nfe`,
     headers: getHeaders(token),
     data: payload,
+    __accountId: account.id,
+    __nfeReconcile: () => findNfeCreatedFromPayload(account, token, payload, nfeRequestStartedAt),
   });
 
   return data?.data;
